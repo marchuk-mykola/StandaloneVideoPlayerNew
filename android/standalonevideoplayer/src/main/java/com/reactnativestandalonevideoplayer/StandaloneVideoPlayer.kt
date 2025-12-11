@@ -1,0 +1,246 @@
+package com.reactnativestandalonevideoplayer
+
+
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+import com.facebook.react.bridge.*
+import com.facebook.react.modules.core.DeviceEventManagerModule
+
+class StandaloneVideoPlayer(val context: ReactApplicationContext): ReactContextBaseJavaModule(context), LifecycleEventListener {
+
+  override fun getName(): String {
+    return "StandaloneVideoPlayer"
+  }
+
+  //
+  // Every ExoPlayer requires to operate on the same thread ("Player is accessed on the wrong thread")
+  // We use main thread here (Handler(context.mainLooper).post)
+  //
+
+  //
+
+  init {
+    context.addLifecycleEventListener(this)
+
+    // Create first instance synchronously to avoid race condition
+    val instance = PlayerVideo(context)
+    PlayerVideo.instances.add(instance)
+  }
+
+  //
+  // LifecycleEventListener
+  //
+  override fun onHostResume() {
+    Log.d("PlayerVideo", "onHostResume")
+  }
+
+  override fun onHostPause() {
+    // Don't stop players - allow background playback
+    // Players will continue playing and maintain position
+  }
+
+  override fun onHostDestroy() {
+    Handler(context.mainLooper).post {
+      for (instance in PlayerVideo.instances) {
+        instance.stop()
+        instance.release()
+      }
+    }
+  }
+
+  //
+  //
+  //
+
+  @ReactMethod
+  fun newInstance() {
+    // intialize player instance
+    Handler(context.mainLooper).post {
+      val instance = PlayerVideo(context)
+      PlayerVideo.instances.add(instance)
+    }
+  }
+
+  @ReactMethod
+  fun load(instance: Int, url: String, isHls: Boolean, loop: Boolean, isSilent: Boolean) {
+    if (instance < 0) {
+      return
+    }
+
+    Handler(context.mainLooper).post {
+      // Create new instances if needed
+      while (PlayerVideo.instances.size <= instance) {
+        val newInstance = PlayerVideo(context)
+        PlayerVideo.instances.add(newInstance)
+        Log.d("PlayerVideo", "Created new instance ${PlayerVideo.instances.size - 1}")
+        // Bind any pending views waiting for this instance
+        PlayerContainerView.bindPendingViews()
+      }
+      Log.d("PlayerVideo", "Load = ${url}")
+
+      // mqt_native_modules
+      Log.d("PlayerVideo", "LOOPER load = ${Looper.myLooper()}, main = ${context.mainLooper}")
+
+      PlayerVideo.instances[instance].statusChanged = { status ->
+        Log.d("PlayerVideo", "STATUS = ${status}")
+
+        val map = Arguments.createMap()
+        map.putInt("status", status.value)
+        map.putInt("instance", instance)
+
+        context.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+          .emit("PlayerStatusChanged", map)
+      }
+
+      PlayerVideo.instances[instance].progressChanged = { progress, duration ->
+        Log.d("PlayerVideo", "PROGRESS = ${progress}")
+
+        val map = Arguments.createMap()
+        map.putDouble("progress", progress)
+        map.putDouble("duration", duration / 1000)
+        map.putInt("instance", instance)
+
+        context.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+          .emit("PlayerProgressChanged", map)
+      }
+
+      PlayerVideo.instances[instance].loadVideo(url, isHls, loop)
+
+      if (isSilent) {
+        PlayerVideo.instances[instance].volume = 0f
+      }
+    }
+
+
+  }
+
+  @ReactMethod
+  fun stop(instance: Int) {
+    if (instance < 0 || instance >= PlayerVideo.instances.size) {
+      return
+    }
+
+    Handler(context.mainLooper).post {
+      Log.d("PlayerVideo", "STOOOOP!!")
+
+      PlayerVideo.instances[instance].stop()
+
+      PlayerVideo.instances[instance].statusChanged = null
+    }
+  }
+
+  @ReactMethod
+  fun play(instance: Int) {
+    if (instance < 0 || instance >= PlayerVideo.instances.size) {
+      return
+    }
+
+    Handler(context.mainLooper).post {
+      Log.d("PlayerVideo", "PLAY")
+
+      PlayerVideo.instances[instance].play()
+    }
+  }
+
+  @ReactMethod
+  fun pause(instance: Int) {
+    if (instance < 0 || instance >= PlayerVideo.instances.size) {
+      return
+    }
+
+    Handler(context.mainLooper).post {
+      Log.d("PlayerVideo", "PAUSE")
+
+      PlayerVideo.instances[instance].pause()
+    }
+  }
+
+  @ReactMethod
+  fun seek(instance: Int, position: Double) {
+    if (instance < 0 || instance >= PlayerVideo.instances.size) {
+      return
+    }
+
+    Handler(context.mainLooper).post {
+      Log.d("PlayerVideo", "SEEK TO = ${position}")
+
+      PlayerVideo.instances[instance].seek(position)
+    }
+  }
+
+  @ReactMethod
+  fun seekForward(instance: Int, time: Double) {
+    if (instance < 0 || instance >= PlayerVideo.instances.size) {
+      return
+    }
+
+    Handler(context.mainLooper).post {
+      Log.d("PlayerVideo", "SEEK FORWARD by = ${time}")
+
+      PlayerVideo.instances[instance].seekForward(time)
+    }
+  }
+
+  @ReactMethod
+  fun seekRewind(instance: Int, time: Double) {
+    if (instance < 0 || instance >= PlayerVideo.instances.size) {
+      return
+    }
+
+    Handler(context.mainLooper).post {
+      Log.d("PlayerVideo", "SEEK FORWARD by = ${time}")
+
+      PlayerVideo.instances[instance].seekRewind(time)
+    }
+  }
+
+  @ReactMethod
+  fun setVolume(instance: Int, volume: Float) {
+    if (instance < 0 || instance >= PlayerVideo.instances.size) {
+      return
+    }
+
+    Handler(context.mainLooper).post {
+      Log.d("PlayerVideo", "setVolume = ${volume}")
+
+      PlayerVideo.instances[instance].volume = volume
+    }
+  }
+
+  @ReactMethod
+  fun getDuration(instance: Int, promise: Promise) {
+    if (instance < 0 || instance >= PlayerVideo.instances.size) {
+      promise.resolve(0)
+      return
+    }
+
+    Handler(context.mainLooper).post {
+      val duration = PlayerVideo.instances[instance].duration / 1000
+      promise.resolve(duration)
+    }
+  }
+
+  @ReactMethod
+  fun getProgress(instance: Int, promise: Promise) {
+    if (instance < 0 || instance >= PlayerVideo.instances.size) {
+      promise.resolve(0)
+      return
+    }
+
+    Handler(context.mainLooper).post {
+      val duration = PlayerVideo.instances[instance].progress
+      promise.resolve(duration)
+    }
+  }
+
+  @ReactMethod
+  fun addListener(eventName: String) {
+    // Required for RN NativeEventEmitter
+  }
+
+  @ReactMethod
+  fun removeListeners(count: Int) {
+    // Required for RN NativeEventEmitter
+  }
+}
