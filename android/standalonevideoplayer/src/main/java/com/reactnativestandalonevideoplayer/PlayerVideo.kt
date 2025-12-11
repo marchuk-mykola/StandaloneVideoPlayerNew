@@ -16,8 +16,8 @@ import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.datasource.DefaultDataSource
-import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
+import java.util.concurrent.atomic.AtomicBoolean
 
 
 //
@@ -26,20 +26,49 @@ import androidx.media3.datasource.DefaultHttpDataSource
 class PlayerVideo(val context: Context) {
 
   companion object {
-    var instances: MutableList<PlayerVideo> = mutableListOf()
+    // Thread-safe instance management
+    private val instancesLock = Any()
+    private val _instances: MutableList<PlayerVideo> = mutableListOf()
 
-    // Shared DataSource factory for all players (performance optimization)
+    // Thread-safe read-only access to instances list
+    val instances: List<PlayerVideo>
+      get() = synchronized(instancesLock) { _instances.toList() }
+
+    val instanceCount: Int
+      get() = synchronized(instancesLock) { _instances.size }
+
+    fun addInstance(instance: PlayerVideo) = synchronized(instancesLock) {
+      _instances.add(instance)
+    }
+
+    fun getInstance(index: Int): PlayerVideo? = synchronized(instancesLock) {
+      _instances.getOrNull(index)
+    }
+
+    fun clearInstances() = synchronized(instancesLock) {
+      _instances.clear()
+    }
+
+    fun releaseAllInstances() = synchronized(instancesLock) {
+      _instances.forEach { it.release() }
+      _instances.clear()
+    }
+
+    // Thread-safe DataSource factory (double-checked locking)
+    @Volatile
     private var sharedDataSourceFactory: DefaultDataSource.Factory? = null
+    private val factoryLock = Any()
 
     fun getDataSourceFactory(context: Context): DefaultDataSource.Factory {
-      if (sharedDataSourceFactory == null) {
-        val httpDataSourceFactory = DefaultHttpDataSource.Factory()
-          .setConnectTimeoutMs(8000)
-          .setReadTimeoutMs(8000)
-          .setAllowCrossProtocolRedirects(true)
-        sharedDataSourceFactory = DefaultDataSource.Factory(context, httpDataSourceFactory)
+      return sharedDataSourceFactory ?: synchronized(factoryLock) {
+        sharedDataSourceFactory ?: DefaultDataSource.Factory(
+          context.applicationContext,
+          DefaultHttpDataSource.Factory()
+            .setConnectTimeoutMs(8000)
+            .setReadTimeoutMs(8000)
+            .setAllowCrossProtocolRedirects(true)
+        ).also { sharedDataSourceFactory = it }
       }
-      return sharedDataSourceFactory!!
     }
   }
 
@@ -74,10 +103,14 @@ class PlayerVideo(val context: Context) {
     .setLoadControl(loadControl)
     .setRenderersFactory(renderersFactory)
     .setHandleAudioBecomingNoisy(true) // Pause when headphones unplugged
-    .setWakeMode(C.WAKE_MODE_NETWORK) // Keep network active during playback
     .build()
 
-  private var listenerAdded = false
+  // Player listener reference for cleanup
+  private var playerListener: Player.Listener? = null
+
+  // Atomic flag to prevent race conditions during release
+  private val _isReleased = AtomicBoolean(false)
+  val isReleased: Boolean get() = _isReleased.get()
 
   var autoplay: Boolean = true
 
@@ -87,57 +120,53 @@ class PlayerVideo(val context: Context) {
 
   var videoSizeChanged: ((width: Int, height: Int) -> Unit)? = null
 
-  var currentStatus: PlayerVideoStatus
+  val currentStatus: PlayerVideoStatus
     get() = status
-    set(value) {}
 
-  var isPlaying: Boolean
+  val isPlaying: Boolean
     get() = status == PlayerVideoStatus.playing
-    set(value) {}
 
-  var isLoaded: Boolean
+  val isLoaded: Boolean
     get() = status == PlayerVideoStatus.playing || status == PlayerVideoStatus.paused || status == PlayerVideoStatus.loading
-    set(value) {}
 
-  var isLoading: Boolean
+  val isLoading: Boolean
     get() = status == PlayerVideoStatus.loading
-    set(value) {}
 
   var volume: Float
     get() = player.volume
-    set(value) { player.volume = value }
+    set(value) {
+      if (!isReleased) {
+        player.volume = value.coerceIn(0f, 1f)
+      }
+    }
 
-  var duration: Double
+  val duration: Double
     get() {
       if (player.duration == C.TIME_UNSET) {
-        Log.d("PlayerVideo", "DURRRRR: TIME_UNSET")
         return 0.0
       }
-
-      val dur = player.duration.toDouble()
-
-      Log.d("PlayerVideo", "DURRRRR: ${dur}")
-      return dur
+      return player.duration.toDouble()
     }
-    set(value){}
 
-  var position: Double
+  val position: Double
     get() = player.currentPosition.toDouble()
-    set(value){}
 
-  var progress: Double
+  val progress: Double
     get() {
       if (player.duration > 0) {
         return player.currentPosition.toDouble() / player.duration.toDouble()
       }
-
       return 0.0
     }
-    set(value) {}
 
   //
 
   fun loadVideo(url: String, isHls: Boolean, loop: Boolean) {
+    if (isReleased) {
+      Log.w("PlayerVideo", "Cannot load video - player is released")
+      return
+    }
+
     // Use shared DataSource factory for better performance
     val dataSourceFactory = getDataSourceFactory(context)
 
@@ -159,17 +188,15 @@ class PlayerVideo(val context: Context) {
 
     player.playWhenReady = autoplay
     player.repeatMode = if(loop) Player.REPEAT_MODE_ALL else Player.REPEAT_MODE_OFF
-    player.videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
+    player.videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT
 
     setStatus(PlayerVideoStatus.new)
 
-    // Add listener only once
-    if (!listenerAdded) {
-      listenerAdded = true
-      player.addListener(object: Player.Listener {
+    // Add listener only once (store reference for cleanup)
+    if (playerListener == null) {
+      playerListener = object: Player.Listener {
         override fun onPlaybackStateChanged(playbackState: Int) {
-          Log.d("PlayerVideo", "onPlaybackStateChanged = ${playbackState}")
-
+          if (isReleased) return
           when(playbackState) {
             Player.STATE_IDLE -> {} // Don't change status on idle, we manage it manually
             Player.STATE_BUFFERING -> setStatus(PlayerVideoStatus.loading)
@@ -182,88 +209,107 @@ class PlayerVideo(val context: Context) {
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
+          if (isReleased) return
           if (player.playbackState == Player.STATE_READY) {
             setStatus(if(isPlaying) PlayerVideoStatus.playing else PlayerVideoStatus.paused)
           }
         }
 
         override fun onVideoSizeChanged(videoSize: VideoSize) {
-          Log.d("PlayerView", "onVideoSizeChanged width=${videoSize.width}, height=${videoSize.height}")
+          if (isReleased) return
           videoSizeChanged?.invoke(videoSize.width, videoSize.height)
         }
 
         override fun onPlayerError(error: PlaybackException) {
+          if (isReleased) return
           Log.e("PlayerVideo", "Playback error: ${error.errorCode}, ${error.message}")
-          Log.e("PlayerVideo", "Error cause: ${error.cause}")
           setStatus(PlayerVideoStatus.error)
         }
-      })
+      }
+      player.addListener(playerListener!!)
     }
 
     startProgressTimer()
   }
 
   fun play() {
-    Log.d("PlayerVideo", "play")
+    if (isReleased) return
 
     if (status === PlayerVideoStatus.finished) {
       seek(0.0)
     }
 
     player.playWhenReady = true
-
     startProgressTimer()
   }
 
   fun pause() {
-    Log.d("PlayerVideo", "pause")
-
+    if (isReleased) return
     player.playWhenReady = false
-
-    stopProgressTimer()
   }
 
   fun stop() {
-    Log.d("PlayerVideo", "stop")
+    if (isReleased) return
 
     player.stop()
     player.clearMediaItems()
-
     setStatus(PlayerVideoStatus.stopped)
-
     stopProgressTimer()
   }
 
   fun clear() {
-    Log.d("PlayerVideo", "clear - releasing resources")
+    if (isReleased) return
 
     player.stop()
     player.clearMediaItems()
-
     setStatus(PlayerVideoStatus.none)
-
     stopProgressTimer()
   }
 
   fun seek(progress: Double) {
-    Log.d("PlayerVideo", "seek: ${progress}")
-
-    player.seekTo((duration * progress).toLong())
+    if (isReleased) return
+    val clampedProgress = progress.coerceIn(0.0, 1.0)
+    player.seekTo((duration * clampedProgress).toLong())
+    // Immediately notify progress change after seek
+    progressChanged?.invoke(clampedProgress, duration)
   }
 
   fun seekForward(time: Double) {
-    Log.d("PlayerVideo", "Seek forward position=${position}, by=${time*1000}")
-
-    player.seekTo((position + time*1000).toLong())
+    if (isReleased || time < 0) return
+    val maxPosition = if (player.duration > 0) player.duration else Long.MAX_VALUE
+    val newPosition = (position + time * 1000).toLong().coerceAtMost(maxPosition)
+    player.seekTo(newPosition)
+    // Immediately notify progress change after seek
+    progressChanged?.invoke(this.progress, duration)
   }
 
   fun seekRewind(time: Double) {
-    Log.d("PlayerVideo", "Seek rewind position=${position}, by=${time*1000}")
-
-    player.seekTo((position - time * 1000).toLong())
+    if (isReleased || time < 0) return
+    val newPosition = (position - time * 1000).toLong().coerceAtLeast(0)
+    player.seekTo(newPosition)
+    // Immediately notify progress change after seek
+    progressChanged?.invoke(this.progress, duration)
   }
 
   fun release() {
+    // Atomic check-and-set to prevent double release
+    if (!_isReleased.compareAndSet(false, true)) return
+
+    stopProgressTimer()
+
+    // Remove listener to prevent memory leaks
+    playerListener?.let { player.removeListener(it) }
+    playerListener = null
+
+    // Clear callbacks to prevent memory leaks
+    statusChanged = null
+    progressChanged = null
+    videoSizeChanged = null
+
+    // Clear handler completely
+    progressHandler?.removeCallbacksAndMessages(null)
+    progressHandler = null
+
     player.release()
   }
 
@@ -274,9 +320,6 @@ class PlayerVideo(val context: Context) {
 
   private fun setStatus(newStatus: PlayerVideoStatus) {
     status = newStatus
-
-    Log.d("PlayerVideo", "NEW status = ${status}")
-
     statusChanged?.invoke(status)
 
     if (status == PlayerVideoStatus.stopped || status == PlayerVideoStatus.none || status == PlayerVideoStatus.error) {
@@ -285,7 +328,7 @@ class PlayerVideo(val context: Context) {
   }
 
   private fun startProgressTimer() {
-    if (isProgressTimerRunning) return // Don't start if already running
+    if (isProgressTimerRunning || isReleased) return // Don't start if already running or released
 
     isProgressTimerRunning = true
 
@@ -295,8 +338,10 @@ class PlayerVideo(val context: Context) {
 
     progressRunnable = object : Runnable {
       override fun run() {
-        if (isProgressTimerRunning && player.isPlaying) {
+        if (isProgressTimerRunning && !isReleased) {
+          // Always send progress update
           progressChanged?.invoke(progress, duration)
+          // Always continue the timer loop
           progressHandler?.postDelayed(this, PROGRESS_UPDATE_TIME)
         }
       }

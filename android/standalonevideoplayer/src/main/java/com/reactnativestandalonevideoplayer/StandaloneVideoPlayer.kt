@@ -2,7 +2,6 @@ package com.reactnativestandalonevideoplayer
 
 
 import android.os.Handler
-import android.os.Looper
 import android.util.Log
 import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.DeviceEventManagerModule
@@ -20,19 +19,23 @@ class StandaloneVideoPlayer(val context: ReactApplicationContext): ReactContextB
 
   //
 
+  companion object {
+    private const val TAG = "StandaloneVideoPlayer"
+  }
+
   init {
     context.addLifecycleEventListener(this)
 
     // Create first instance synchronously to avoid race condition
     val instance = PlayerVideo(context)
-    PlayerVideo.instances.add(instance)
+    PlayerVideo.addInstance(instance)
   }
 
   //
   // LifecycleEventListener
   //
   override fun onHostResume() {
-    Log.d("PlayerVideo", "onHostResume")
+    // App resumed from background
   }
 
   override fun onHostPause() {
@@ -42,9 +45,11 @@ class StandaloneVideoPlayer(val context: ReactApplicationContext): ReactContextB
 
   override fun onHostDestroy() {
     Handler(context.mainLooper).post {
-      for (instance in PlayerVideo.instances) {
-        instance.stop()
-        instance.release()
+      try {
+        PlayerVideo.releaseAllInstances()
+        PlayerContainerView.clearPendingViews()
+      } catch (e: Exception) {
+        Log.e(TAG, "Error in onHostDestroy: ${e.message}")
       }
     }
   }
@@ -55,10 +60,13 @@ class StandaloneVideoPlayer(val context: ReactApplicationContext): ReactContextB
 
   @ReactMethod
   fun newInstance() {
-    // intialize player instance
     Handler(context.mainLooper).post {
-      val instance = PlayerVideo(context)
-      PlayerVideo.instances.add(instance)
+      try {
+        val instance = PlayerVideo(context)
+        PlayerVideo.addInstance(instance)
+      } catch (e: Exception) {
+        Log.e(TAG, "Error creating new instance: ${e.message}")
+      }
     }
   }
 
@@ -69,168 +77,185 @@ class StandaloneVideoPlayer(val context: ReactApplicationContext): ReactContextB
     }
 
     Handler(context.mainLooper).post {
-      // Create new instances if needed
-      while (PlayerVideo.instances.size <= instance) {
-        val newInstance = PlayerVideo(context)
-        PlayerVideo.instances.add(newInstance)
-        Log.d("PlayerVideo", "Created new instance ${PlayerVideo.instances.size - 1}")
-        // Bind any pending views waiting for this instance
+      try {
+        // Create new instances if needed
+        while (PlayerVideo.instanceCount <= instance) {
+          val newInstance = PlayerVideo(context)
+          PlayerVideo.addInstance(newInstance)
+        }
+
+        // Always try to bind pending views after ensuring instances exist
         PlayerContainerView.bindPendingViews()
-      }
-      Log.d("PlayerVideo", "Load = ${url}")
 
-      // mqt_native_modules
-      Log.d("PlayerVideo", "LOOPER load = ${Looper.myLooper()}, main = ${context.mainLooper}")
+        val player = PlayerVideo.getInstance(instance) ?: return@post
 
-      PlayerVideo.instances[instance].statusChanged = { status ->
-        Log.d("PlayerVideo", "STATUS = ${status}")
+        player.statusChanged = { status ->
+          try {
+            val map = Arguments.createMap()
+            map.putInt("status", status.value)
+            map.putInt("instance", instance)
 
-        val map = Arguments.createMap()
-        map.putInt("status", status.value)
-        map.putInt("instance", instance)
+            context.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+              .emit("PlayerStatusChanged", map)
+          } catch (e: Exception) {
+            Log.e(TAG, "Error emitting status: ${e.message}")
+          }
+        }
 
-        context.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
-          .emit("PlayerStatusChanged", map)
-      }
+        player.progressChanged = { progress, duration ->
+          try {
+            val map = Arguments.createMap()
+            map.putDouble("progress", progress)
+            map.putDouble("duration", duration / 1000)
+            map.putInt("instance", instance)
 
-      PlayerVideo.instances[instance].progressChanged = { progress, duration ->
-        Log.d("PlayerVideo", "PROGRESS = ${progress}")
+            context.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+              .emit("PlayerProgressChanged", map)
+          } catch (e: Exception) {
+            Log.e(TAG, "Error emitting progress: ${e.message}")
+          }
+        }
 
-        val map = Arguments.createMap()
-        map.putDouble("progress", progress)
-        map.putDouble("duration", duration / 1000)
-        map.putInt("instance", instance)
+        player.loadVideo(url, isHls, loop)
 
-        context.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
-          .emit("PlayerProgressChanged", map)
-      }
-
-      PlayerVideo.instances[instance].loadVideo(url, isHls, loop)
-
-      if (isSilent) {
-        PlayerVideo.instances[instance].volume = 0f
+        if (isSilent) {
+          player.volume = 0f
+        }
+      } catch (e: Exception) {
+        Log.e(TAG, "Error in load: ${e.message}")
       }
     }
-
-
   }
 
   @ReactMethod
   fun stop(instance: Int) {
-    if (instance < 0 || instance >= PlayerVideo.instances.size) {
-      return
-    }
+    if (instance < 0) return
 
     Handler(context.mainLooper).post {
-      Log.d("PlayerVideo", "STOOOOP!!")
-
-      PlayerVideo.instances[instance].stop()
-
-      PlayerVideo.instances[instance].statusChanged = null
+      try {
+        PlayerVideo.getInstance(instance)?.let { player ->
+          player.stop()
+          player.statusChanged = null
+        }
+      } catch (e: Exception) {
+        Log.e(TAG, "Error in stop: ${e.message}")
+      }
     }
   }
 
   @ReactMethod
   fun play(instance: Int) {
-    if (instance < 0 || instance >= PlayerVideo.instances.size) {
-      return
-    }
+    if (instance < 0) return
 
     Handler(context.mainLooper).post {
-      Log.d("PlayerVideo", "PLAY")
-
-      PlayerVideo.instances[instance].play()
+      try {
+        PlayerVideo.getInstance(instance)?.play()
+      } catch (e: Exception) {
+        Log.e(TAG, "Error in play: ${e.message}")
+      }
     }
   }
 
   @ReactMethod
   fun pause(instance: Int) {
-    if (instance < 0 || instance >= PlayerVideo.instances.size) {
-      return
-    }
+    if (instance < 0) return
 
     Handler(context.mainLooper).post {
-      Log.d("PlayerVideo", "PAUSE")
-
-      PlayerVideo.instances[instance].pause()
+      try {
+        PlayerVideo.getInstance(instance)?.pause()
+      } catch (e: Exception) {
+        Log.e(TAG, "Error in pause: ${e.message}")
+      }
     }
   }
 
   @ReactMethod
   fun seek(instance: Int, position: Double) {
-    if (instance < 0 || instance >= PlayerVideo.instances.size) {
-      return
-    }
+    if (instance < 0) return
 
     Handler(context.mainLooper).post {
-      Log.d("PlayerVideo", "SEEK TO = ${position}")
-
-      PlayerVideo.instances[instance].seek(position)
+      try {
+        PlayerVideo.getInstance(instance)?.seek(position)
+      } catch (e: Exception) {
+        Log.e(TAG, "Error in seek: ${e.message}")
+      }
     }
   }
 
   @ReactMethod
   fun seekForward(instance: Int, time: Double) {
-    if (instance < 0 || instance >= PlayerVideo.instances.size) {
-      return
-    }
+    if (instance < 0) return
 
     Handler(context.mainLooper).post {
-      Log.d("PlayerVideo", "SEEK FORWARD by = ${time}")
-
-      PlayerVideo.instances[instance].seekForward(time)
+      try {
+        PlayerVideo.getInstance(instance)?.seekForward(time)
+      } catch (e: Exception) {
+        Log.e(TAG, "Error in seekForward: ${e.message}")
+      }
     }
   }
 
   @ReactMethod
   fun seekRewind(instance: Int, time: Double) {
-    if (instance < 0 || instance >= PlayerVideo.instances.size) {
-      return
-    }
+    if (instance < 0) return
 
     Handler(context.mainLooper).post {
-      Log.d("PlayerVideo", "SEEK FORWARD by = ${time}")
-
-      PlayerVideo.instances[instance].seekRewind(time)
+      try {
+        PlayerVideo.getInstance(instance)?.seekRewind(time)
+      } catch (e: Exception) {
+        Log.e(TAG, "Error in seekRewind: ${e.message}")
+      }
     }
   }
 
   @ReactMethod
   fun setVolume(instance: Int, volume: Float) {
-    if (instance < 0 || instance >= PlayerVideo.instances.size) {
-      return
-    }
+    if (instance < 0) return
 
     Handler(context.mainLooper).post {
-      Log.d("PlayerVideo", "setVolume = ${volume}")
-
-      PlayerVideo.instances[instance].volume = volume
+      try {
+        PlayerVideo.getInstance(instance)?.let { it.volume = volume }
+      } catch (e: Exception) {
+        Log.e(TAG, "Error in setVolume: ${e.message}")
+      }
     }
   }
 
   @ReactMethod
   fun getDuration(instance: Int, promise: Promise) {
-    if (instance < 0 || instance >= PlayerVideo.instances.size) {
+    if (instance < 0) {
       promise.resolve(0)
       return
     }
 
     Handler(context.mainLooper).post {
-      val duration = PlayerVideo.instances[instance].duration / 1000
-      promise.resolve(duration)
+      try {
+        val player = PlayerVideo.getInstance(instance)
+        val duration = player?.duration?.div(1000) ?: 0.0
+        promise.resolve(duration)
+      } catch (e: Exception) {
+        Log.e(TAG, "Error in getDuration: ${e.message}")
+        promise.resolve(0)
+      }
     }
   }
 
   @ReactMethod
   fun getProgress(instance: Int, promise: Promise) {
-    if (instance < 0 || instance >= PlayerVideo.instances.size) {
+    if (instance < 0) {
       promise.resolve(0)
       return
     }
 
     Handler(context.mainLooper).post {
-      val duration = PlayerVideo.instances[instance].progress
-      promise.resolve(duration)
+      try {
+        val player = PlayerVideo.getInstance(instance)
+        val progress = player?.progress ?: 0.0
+        promise.resolve(progress)
+      } catch (e: Exception) {
+        Log.e(TAG, "Error in getProgress: ${e.message}")
+        promise.resolve(0)
+      }
     }
   }
 

@@ -5,10 +5,16 @@ import {
   FlatList,
   TouchableOpacity,
   ViewToken,
+  Text,
 } from 'react-native';
+import Slider from '@react-native-community/slider';
 import {
   useVideoPlayer,
   PlayerVideoView,
+  usePlayerVideoProgress,
+  usePlayerVideoStatus,
+  PlayerVideoManager,
+  PlayerStatus,
 } from './src/StandaloneVideoPlayer';
 
 //
@@ -23,17 +29,36 @@ const VideoUrls = [
 
 //
 
+// Sync configuration: players 1 and 2 will be synchronized
+const SYNCED_PLAYERS = [1, 2];
+const SYNC_VIDEO_URL = VideoUrls[1]; // Both synced players use the same video
+
 type ItemProps = {
   index: number;
   videoUrl: string;
   isVisible: boolean;
+  isSynced: boolean;
+  onSyncAction?: (action: 'play' | 'pause' | 'seek' | 'seekForward' | 'seekRewind', value?: number) => void;
 };
 
 //
 
-const VideoItem = ({ index, videoUrl, isVisible }: ItemProps) => {
+const formatTime = (seconds: number) => {
+  const mins = Math.floor(seconds / 60);
+  const secs = Math.floor(seconds % 60);
+  return `${mins}:${secs.toString().padStart(2, '0')}`;
+};
+
+const VideoItem = ({ index, videoUrl, isVisible, isSynced, onSyncAction }: ItemProps) => {
   const player = useVideoPlayer(index);
   const hasLoaded = useRef(false);
+  const [isMuted, setIsMuted] = useState(false);
+  const [isSeeking, setIsSeeking] = useState(false);
+  const { progress, duration } = usePlayerVideoProgress(index);
+  const { status } = usePlayerVideoStatus(index);
+
+  // Derive isPaused from actual player status
+  const isPaused = status === PlayerStatus.paused || status === PlayerStatus.stopped || status === PlayerStatus.finished;
 
   useEffect(() => {
     // Load video only once on first visibility
@@ -45,13 +70,48 @@ const VideoItem = ({ index, videoUrl, isVisible }: ItemProps) => {
     // Video continues playing in background - no stop/pause when not visible
   }, [isVisible, player, videoUrl, index]);
 
+  const togglePlayPause = () => {
+    if (isPaused) {
+      player.play();
+      if (isSynced && onSyncAction) onSyncAction('play');
+    } else {
+      player.pause();
+      if (isSynced && onSyncAction) onSyncAction('pause');
+    }
+  };
+
+  const toggleMute = () => {
+    const newMuted = !isMuted;
+    setIsMuted(newMuted);
+    // @ts-ignore
+    PlayerVideoManager.setVolume(index, newMuted ? 0 : 1);
+  };
+
+  const handleSeek = (value: number) => {
+    setIsSeeking(false);
+    player.seek(value);
+    if (isSynced && onSyncAction) onSyncAction('seek', value);
+  };
+
+  const handleSeekRewind = () => {
+    player.seekRewind(10);
+    if (isSynced && onSyncAction) onSyncAction('seekRewind', 10);
+  };
+
+  const handleSeekForward = () => {
+    player.seekForward(10);
+    if (isSynced && onSyncAction) onSyncAction('seekForward', 10);
+  };
+
+  const currentTime = duration > 0 ? progress * duration : 0;
+
   return (
-    <TouchableOpacity
-      style={styles.itemContainer}
-      activeOpacity={0.8}
-      onPress={() => player.play()}
-      onLongPress={() => player.pause()}
-    >
+    <View style={styles.itemContainer}>
+      {isSynced && (
+        <View style={styles.syncBadge}>
+          <Text style={styles.syncBadgeText}>SYNCED</Text>
+        </View>
+      )}
       <View style={styles.player} pointerEvents={'none'}>
         <PlayerVideoView
           style={styles.player}
@@ -59,7 +119,38 @@ const VideoItem = ({ index, videoUrl, isVisible }: ItemProps) => {
           playerInstance={index}
         />
       </View>
-    </TouchableOpacity>
+      <View style={styles.controlsContainer}>
+        <View style={styles.progressContainer}>
+          <Text style={styles.timeText}>{formatTime(currentTime)}</Text>
+          <Slider
+            style={styles.slider}
+            minimumValue={0}
+            maximumValue={1}
+            value={isSeeking ? undefined : progress}
+            onSlidingStart={() => setIsSeeking(true)}
+            onSlidingComplete={handleSeek}
+            minimumTrackTintColor={isSynced ? '#00FF00' : '#FFFFFF'}
+            maximumTrackTintColor="rgba(255, 255, 255, 0.3)"
+            thumbTintColor={isSynced ? '#00FF00' : '#FFFFFF'}
+          />
+          <Text style={styles.timeText}>{formatTime(duration)}</Text>
+        </View>
+        <View style={styles.controls}>
+          <TouchableOpacity style={styles.controlButton} onPress={handleSeekRewind}>
+            <Text style={styles.controlButtonText}>-10s</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.controlButton} onPress={togglePlayPause}>
+            <Text style={styles.controlButtonText}>{isPaused ? '▶' : '⏸'}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.controlButton} onPress={handleSeekForward}>
+            <Text style={styles.controlButtonText}>+10s</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.controlButton} onPress={toggleMute}>
+            <Text style={styles.controlButtonText}>{isMuted ? '🔇' : '🔊'}</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </View>
   );
 };
 
@@ -67,7 +158,7 @@ const VideoItemMemo = React.memo(VideoItem);
 
 //
 
-const items = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]; // 10 players
+const items = [0, 1, 2, 3]; // 4 players
 
 // Viewability configuration
 const viewabilityConfig = {
@@ -79,6 +170,36 @@ const viewabilityConfig = {
 
 export default function App() {
   const [visibleItems, setVisibleItems] = useState<Set<number>>(new Set([0, 1]));
+
+  // Players for synced control
+  const player1 = useVideoPlayer(SYNCED_PLAYERS[0]);
+  const player2 = useVideoPlayer(SYNCED_PLAYERS[1]);
+
+  const handleSyncAction = useCallback((sourceIndex: number, action: 'play' | 'pause' | 'seek' | 'seekForward' | 'seekRewind', value?: number) => {
+    // Apply action to all synced players except the source
+    SYNCED_PLAYERS.forEach((playerIndex) => {
+      if (playerIndex !== sourceIndex) {
+        const targetPlayer = playerIndex === SYNCED_PLAYERS[0] ? player1 : player2;
+        switch (action) {
+          case 'play':
+            targetPlayer.play();
+            break;
+          case 'pause':
+            targetPlayer.pause();
+            break;
+          case 'seek':
+            if (value !== undefined) targetPlayer.seek(value);
+            break;
+          case 'seekForward':
+            if (value !== undefined) targetPlayer.seekForward(value);
+            break;
+          case 'seekRewind':
+            if (value !== undefined) targetPlayer.seekRewind(value);
+            break;
+        }
+      }
+    });
+  }, [player1, player2]);
 
   const onViewableItemsChanged = useCallback(
     ({ viewableItems }: { viewableItems: ViewToken[] }) => {
@@ -97,14 +218,21 @@ export default function App() {
   ]);
 
   const renderItem = useCallback(
-    ({ item: index }: { item: number }) => (
-      <VideoItemMemo
-        index={index}
-        videoUrl={VideoUrls[index % VideoUrls.length]}
-        isVisible={visibleItems.has(index)}
-      />
-    ),
-    [visibleItems]
+    ({ item: index }: { item: number }) => {
+      const isSynced = SYNCED_PLAYERS.includes(index);
+      const videoUrl = isSynced ? SYNC_VIDEO_URL : VideoUrls[index % VideoUrls.length];
+
+      return (
+        <VideoItemMemo
+          index={index}
+          videoUrl={videoUrl}
+          isVisible={visibleItems.has(index)}
+          isSynced={isSynced}
+          onSyncAction={(action, value) => handleSyncAction(index, action, value)}
+        />
+      );
+    },
+    [visibleItems, handleSyncAction]
   );
 
   return (
@@ -118,7 +246,7 @@ export default function App() {
         removeClippedSubviews={false}
         maxToRenderPerBatch={5}
         windowSize={11}
-        initialNumToRender={3}
+        initialNumToRender={4}
       />
     </View>
   );
@@ -142,7 +270,66 @@ const styles = StyleSheet.create({
   },
   itemContainer: {
     width: '100%',
-    height: 250,
+    aspectRatio: 16 / 9,
     marginBottom: 10,
+  },
+  controlsContainer: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+  },
+  progressContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  slider: {
+    flex: 1,
+    height: 40,
+    marginHorizontal: 8,
+  },
+  timeText: {
+    color: 'white',
+    fontSize: 12,
+    minWidth: 40,
+    textAlign: 'center',
+  },
+  controls: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 16,
+  },
+  controlButton: {
+    width: 50,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  controlButtonText: {
+    color: 'white',
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  syncBadge: {
+    position: 'absolute',
+    top: 10,
+    left: 10,
+    backgroundColor: '#00FF00',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 4,
+    zIndex: 10,
+  },
+  syncBadgeText: {
+    color: 'black',
+    fontSize: 10,
+    fontWeight: 'bold',
   },
 });

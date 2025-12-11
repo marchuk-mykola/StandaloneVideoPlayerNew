@@ -2,7 +2,6 @@ package com.reactnativestandalonevideoplayer
 
 
 import android.content.Context
-import android.util.Log
 import com.facebook.react.uimanager.SimpleViewManager
 import com.facebook.react.uimanager.ThemedReactContext
 import com.facebook.react.uimanager.annotations.ReactProp
@@ -24,19 +23,41 @@ class MyPlayerView(context: Context): PlayerView(context) {
 class PlayerContainerView: SimpleViewManager<MyPlayerView>() {
 
   companion object {
-    // Views waiting for player instances to be created
-    val pendingViews: MutableList<MyPlayerView> = mutableListOf()
+    // Thread-safe pending views management
+    private val pendingViewsLock = Any()
+    private val _pendingViews: MutableList<MyPlayerView> = mutableListOf()
 
-    fun bindPendingViews() {
-      val iterator = pendingViews.iterator()
+    fun addPendingView(view: MyPlayerView) = synchronized(pendingViewsLock) {
+      if (!_pendingViews.contains(view)) {
+        _pendingViews.add(view)
+      }
+    }
+
+    fun removePendingView(view: MyPlayerView) = synchronized(pendingViewsLock) {
+      _pendingViews.remove(view)
+    }
+
+    fun clearPendingViews() = synchronized(pendingViewsLock) {
+      _pendingViews.clear()
+    }
+
+    fun bindPendingViews() = synchronized(pendingViewsLock) {
+      val iterator = _pendingViews.iterator()
       while (iterator.hasNext()) {
         val view = iterator.next()
-        if (view.playerInstance >= 0 && view.playerInstance < PlayerVideo.instances.size) {
-          Log.d("PlayerView", "Binding pending view for instance ${view.playerInstance}")
-          view.player = if (view.isBound) PlayerVideo.instances[view.playerInstance].player else null
+        val player = PlayerVideo.getInstance(view.playerInstance)
+        if (view.playerInstance >= 0 && player != null) {
+          val targetPlayer = if (view.isBound) player.player else null
+          view.player = targetPlayer
+          view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FILL
+          (targetPlayer as? ExoPlayer)?.videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT
           iterator.remove()
         }
       }
+    }
+
+    fun hasPendingViews(): Boolean = synchronized(pendingViewsLock) {
+      _pendingViews.isNotEmpty()
     }
   }
 
@@ -68,32 +89,38 @@ class PlayerContainerView: SimpleViewManager<MyPlayerView>() {
     }
 
     // Wait for instance to be created if not yet available
-    if (view.playerInstance >= PlayerVideo.instances.size) {
-      if (!pendingViews.contains(view)) {
-        pendingViews.add(view)
-      }
+    val playerVideo = PlayerVideo.getInstance(view.playerInstance)
+    if (playerVideo == null) {
+      addPendingView(view)
       return
     }
 
-    val targetPlayer = if (view.isBound) PlayerVideo.instances[view.playerInstance].player else null
+    // Remove from pending views if it was there
+    removePendingView(view)
 
-    // Only update if player changed (performance optimization)
-    if (view.player != targetPlayer) {
+    val targetPlayer = if (view.isBound) playerVideo.player else null
+
+    // Always update player binding when isBound is true
+    if (view.isBound) {
       view.player = targetPlayer
       view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FILL
-      (targetPlayer as? ExoPlayer)?.videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
-    }
+      (targetPlayer as? ExoPlayer)?.videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT
 
-    // Set up video size callback only once when bound
-    if (view.isBound && targetPlayer != null) {
-      PlayerVideo.instances[view.playerInstance].videoSizeChanged = { _, _ ->
-        // Just refresh resize mode, don't call full setup
+      // Set up video size callback
+      playerVideo.videoSizeChanged = { _, _ ->
+        // Refresh resize mode when video size changes
         view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FILL
       }
+    } else {
+      // Unbind player when not bound
+      view.player = null
+    }
+
+    // Try to bind any pending views now that we have more instances
+    if (hasPendingViews()) {
+      bindPendingViews()
     }
   }
-
-  //
 
   override fun createViewInstance(reactContext: ThemedReactContext): MyPlayerView {
     return MyPlayerView(reactContext).apply {
@@ -105,4 +132,11 @@ class PlayerContainerView: SimpleViewManager<MyPlayerView>() {
     }
   }
 
+  override fun onDropViewInstance(view: MyPlayerView) {
+    // Remove from pending views to prevent memory leak
+    removePendingView(view)
+    // Unbind player
+    view.player = null
+    super.onDropViewInstance(view)
+  }
 }
