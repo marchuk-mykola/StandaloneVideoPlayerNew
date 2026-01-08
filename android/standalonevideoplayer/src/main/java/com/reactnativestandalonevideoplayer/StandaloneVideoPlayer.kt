@@ -116,6 +116,20 @@ class StandaloneVideoPlayer(val context: ReactApplicationContext): ReactContextB
           }
         }
 
+        player.videoSizeChanged = { width, height ->
+          try {
+            val map = Arguments.createMap()
+            map.putInt("width", width)
+            map.putInt("height", height)
+            map.putInt("instance", instance)
+
+            context.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+              .emit("PlayerVideoSizeChanged", map)
+          } catch (e: Exception) {
+            Log.e(TAG, "Error emitting video size: ${e.message}")
+          }
+        }
+
         player.loadVideo(url, isHls, loop)
 
         if (isSilent) {

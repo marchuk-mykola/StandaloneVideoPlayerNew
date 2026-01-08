@@ -49,7 +49,7 @@ class PlayerContainerView: SimpleViewManager<MyPlayerView>() {
         if (view.playerInstance >= 0 && player != null) {
           val targetPlayer = if (view.isBound) player.player else null
           view.player = targetPlayer
-          view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FILL
+          view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
           (targetPlayer as? ExoPlayer)?.videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT
           iterator.remove()
         }
@@ -103,13 +103,13 @@ class PlayerContainerView: SimpleViewManager<MyPlayerView>() {
     // Always update player binding when isBound is true
     if (view.isBound) {
       view.player = targetPlayer
-      view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FILL
+      view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
       (targetPlayer as? ExoPlayer)?.videoScalingMode = C.VIDEO_SCALING_MODE_SCALE_TO_FIT
 
       // Set up video size callback
       playerVideo.videoSizeChanged = { _, _ ->
         // Refresh resize mode when video size changes
-        view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FILL
+        view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
       }
     } else {
       // Unbind player when not bound
@@ -125,7 +125,7 @@ class PlayerContainerView: SimpleViewManager<MyPlayerView>() {
   override fun createViewInstance(reactContext: ThemedReactContext): MyPlayerView {
     return MyPlayerView(reactContext).apply {
       useController = false
-      resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FILL
+      resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
       player = null
       // Disable shutter view for faster display
       setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)

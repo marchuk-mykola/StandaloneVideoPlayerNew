@@ -13,6 +13,7 @@ import {
   PlayerVideoView,
   usePlayerVideoProgress,
   usePlayerVideoStatus,
+  usePlayerVideoSize,
   PlayerVideoManager,
   PlayerStatus,
 } from './src/StandaloneVideoPlayer';
@@ -56,6 +57,12 @@ const VideoItem = ({ index, videoUrl, isVisible, isSynced, onSyncAction }: ItemP
   const [isSeeking, setIsSeeking] = useState(false);
   const { progress, duration } = usePlayerVideoProgress(index);
   const { status } = usePlayerVideoStatus(index);
+  const videoSize = usePlayerVideoSize(index);
+
+  // Calculate aspect ratio from video dimensions, default to 16:9
+  const aspectRatio = videoSize.width > 0 && videoSize.height > 0
+    ? videoSize.width / videoSize.height
+    : 16 / 9;
 
   // Derive isPaused from actual player status
   const isPaused = status === PlayerStatus.paused || status === PlayerStatus.stopped || status === PlayerStatus.finished;
@@ -106,7 +113,7 @@ const VideoItem = ({ index, videoUrl, isVisible, isSynced, onSyncAction }: ItemP
   const currentTime = duration > 0 ? progress * duration : 0;
 
   return (
-    <View style={styles.itemContainer}>
+    <View style={[styles.itemContainer, { aspectRatio }]}>
       {isSynced && (
         <View style={styles.syncBadge}>
           <Text style={styles.syncBadgeText}>SYNCED</Text>
@@ -270,7 +277,6 @@ const styles = StyleSheet.create({
   },
   itemContainer: {
     width: '100%',
-    aspectRatio: 16 / 9,
     marginBottom: 10,
   },
   controlsContainer: {

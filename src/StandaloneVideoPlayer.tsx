@@ -9,7 +9,7 @@ import {
 
 const { StandaloneVideoPlayer } = NativeModules;
 
-type StandaloneVideoPlayerType = {
+type StandaloneVideoPlayerNativeType = {
   newInstance(): void;
 
   load(
@@ -20,7 +20,7 @@ type StandaloneVideoPlayerType = {
     isSilent: boolean
   ): void;
 
-  setVolume(volume: number): void;
+  setVolume(instance: number, volume: number): void;
 
   seek(instance: number, position: number): void;
 
@@ -40,7 +40,24 @@ type StandaloneVideoPlayerType = {
   clear(): void;
 };
 
-const PlayerVideoManager = StandaloneVideoPlayer as StandaloneVideoPlayerType;
+const NativePlayerVideoManager = StandaloneVideoPlayer as StandaloneVideoPlayerNativeType;
+
+// Global mute state tracker per instance
+const MuteState: boolean[] = [];
+
+// Extended manager with convenience methods
+const PlayerVideoManager = {
+  ...NativePlayerVideoManager,
+
+  setMuted(instance: number, muted: boolean): void {
+    MuteState[instance] = muted;
+    NativePlayerVideoManager.setVolume(instance, muted ? 0 : 1);
+  },
+
+  getMuted(instance: number): boolean {
+    return MuteState[instance] ?? false;
+  },
+};
 
 //
 
@@ -188,6 +205,24 @@ function useVideoPlayer(playerInstance = 0) {
     return CurrentVideoId[playerInstance];
   }, [playerInstance]);
 
+  const setVolume = useCallback(
+    (volume: number) => {
+      PlayerVideoManager.setVolume(playerInstance, Math.max(0, Math.min(1, volume)));
+    },
+    [playerInstance]
+  );
+
+  const setMuted = useCallback(
+    (muted: boolean) => {
+      PlayerVideoManager.setMuted(playerInstance, muted);
+    },
+    [playerInstance]
+  );
+
+  const getMuted = useCallback(() => {
+    return PlayerVideoManager.getMuted(playerInstance);
+  }, [playerInstance]);
+
   return useMemo(
     () => ({
       play,
@@ -198,8 +233,11 @@ function useVideoPlayer(playerInstance = 0) {
       seekForward,
       seekRewind,
       getCurrentVideoId,
+      setVolume,
+      setMuted,
+      getMuted,
     }),
-    [getCurrentVideoId, load, pause, play, seek, seekForward, seekRewind, stop]
+    [getCurrentVideoId, load, pause, play, seek, seekForward, seekRewind, stop, setVolume, setMuted, getMuted]
   );
 }
 
@@ -284,6 +322,27 @@ function usePlayerVideoProgress(playerInstance = 0) {
 }
 
 //
+
+function usePlayerVideoSize(playerInstance = 0) {
+  const [size, setSize] = useState({ width: 0, height: 0 });
+
+  useEffect(() => {
+    const subscription = eventEmitter.addListener(
+      'PlayerVideoSizeChanged',
+      (data) => {
+        if (data.instance === playerInstance) {
+          setSize({ width: data.width, height: data.height });
+        }
+      }
+    );
+
+    return () => subscription.remove();
+  }, [playerInstance]);
+
+  return size;
+}
+
+//
 //
 //
 
@@ -333,15 +392,12 @@ interface PlayerViewProps {
 
 //
 
-const PlayerVideoView: React.FunctionComponent<PlayerViewProps> = (
-  props: PlayerViewProps
-) => {
-  return <RNTPlayerVideoView {...props} />;
-};
-
-PlayerVideoView.defaultProps = {
-  isBoundToPlayer: false,
-  playerInstance: -1,
+const PlayerVideoView: React.FunctionComponent<PlayerViewProps> = ({
+  isBoundToPlayer = false,
+  playerInstance = -1,
+  ...props
+}: PlayerViewProps) => {
+  return <RNTPlayerVideoView isBoundToPlayer={isBoundToPlayer} playerInstance={playerInstance} {...props} />;
 };
 
 //
@@ -357,4 +413,5 @@ export {
   useVideoPlayer,
   usePlayerVideoStatus,
   usePlayerVideoProgress,
+  usePlayerVideoSize,
 };
